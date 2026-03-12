@@ -3,6 +3,7 @@
 All notable changes to "Azure Toolkit for IntelliJ IDEA" will be documented in this file.
 
 - [Change Log](#change-log)
+  - [3.97.7](#3977)
   - [3.97.6](#3976)
   - [3.97.5](#3975)
   - [3.97.4](#3974)
@@ -125,6 +126,13 @@ All notable changes to "Azure Toolkit for IntelliJ IDEA" will be documented in t
   - [3.0.8](#308)
   - [3.0.7](#307)
   - [3.0.6](#306)
+
+## 3.97.7
+- Migrate 97 scheduled-for-removal APIs to new IntelliJ Platform APIs
+- Replace deprecated AnActionEvent, ComponentManager, LafManager, Notification APIs
+- Replace deprecated TerminalView, HttpConfigurable, BrowseFolderActionListener APIs
+- Fix registry key conflict for Cosmos DB dbtools module
+- Reduce reflection usage in Scala plugin and Database plugin integration
 
 ## 3.97.6
 ### Fixed
