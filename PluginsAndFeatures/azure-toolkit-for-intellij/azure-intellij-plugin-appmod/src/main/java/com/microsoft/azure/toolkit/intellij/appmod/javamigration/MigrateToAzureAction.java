@@ -12,22 +12,19 @@ import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.actionSystem.ex.ActionUtil;
-import com.intellij.openapi.application.ApplicationManager;
-import com.intellij.openapi.extensions.ExtensionPointName;
 import com.intellij.openapi.project.Project;
-import com.intellij.openapi.util.Key;
+import com.microsoft.azure.toolkit.intellij.appmod.common.AppModPluginInstaller;
+import com.microsoft.azure.toolkit.intellij.appmod.javamigration.MigrationStateService.MigrationState;
+import com.microsoft.azure.toolkit.intellij.appmod.javamigration.MigrationStateService.State;
 import com.microsoft.azure.toolkit.intellij.appmod.utils.AppModPanelHelper;
 import com.microsoft.azure.toolkit.intellij.appmod.utils.AppModUtils;
-import com.microsoft.azure.toolkit.intellij.appmod.common.AppModPluginInstaller;
 import com.microsoft.azure.toolkit.intellij.appmod.utils.Constants;
 import lombok.extern.slf4j.Slf4j;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 /**
  * Unified ActionGroup for "Migrate to Azure" functionality.
@@ -35,106 +32,24 @@ import java.util.stream.Collectors;
  * 1. Plugin NOT installed - direct click triggers installation
  * 2. Plugin installed but no migration options - shows "Open App Mod Panel" action
  * 3. Plugin installed with migration options - sub-menu shows migration options
- * 
- * Data is preloaded by MigrationStatePreloader when project opens.
- * If data is not ready yet, shows "Open App Mod Panel" as fallback.
+ *
+ * <p>Migration state is owned by the shared {@link MigrationStateService} so this menu always
+ * shows the same options as the Azure Explorer and Project Explorer surfaces.</p>
  */
 @Slf4j
 public class MigrateToAzureAction extends ActionGroup {
-    private static final ExtensionPointName<IMigrateOptionProvider> MIGRATION_PROVIDERS =
-        ExtensionPointName.create("com.microsoft.tooling.msservices.intellij.azure.migrateOptionProvider");
-    static final Key<MigrationState> STATE_KEY = Key.create("azure.migrate.action.state");
-    static final Key<Boolean> LOADING_KEY = Key.create("azure.migrate.action.loading");
-    
-    enum State { NOT_INSTALLED, LOADING, NO_OPTIONS, HAS_OPTIONS }
-    
-    static class MigrationState {
-        final State state;
-        final List<MigrateNodeData> nodes;
-        
-        MigrationState(State state, List<MigrateNodeData> nodes) {
-            this.state = state;
-            this.nodes = nodes;
-        }
-    }
 
     @Override
     public @NotNull ActionUpdateThread getActionUpdateThread() {
         return ActionUpdateThread.BGT;
     }
-    
+
     /**
-     * Gets migration state for the project.
-     * State is preloaded by MigrationStatePreloader on project open.
-     * Returns LOADING state if data is not ready yet, and triggers async loading.
+     * Gets migration state from the shared service. Returns LOADING if the shared cache is not
+     * ready yet (the service triggers async loading) so the menu stays responsive.
      */
     private MigrationState getOrComputeState(Project project) {
-        // Fast path: if plugin not installed, return immediately
-        if (!AppModPluginInstaller.isAppModPluginInstalled()) {
-            log.debug("[MigrateToAzureAction] Plugin not installed, returning NOT_INSTALLED");
-            return new MigrationState(State.NOT_INSTALLED, List.of());
-        }
-        
-        // Check if we have preloaded state
-        MigrationState state = project.getUserData(STATE_KEY);
-        if (state != null) {
-            return state;
-        }
-        
-        // State not ready yet - trigger async loading if not already loading
-        Boolean isLoading = project.getUserData(LOADING_KEY);
-        if (!Boolean.TRUE.equals(isLoading)) {
-            project.putUserData(LOADING_KEY, Boolean.TRUE);
-            log.debug("[MigrateToAzureAction] State not ready, triggering async load");
-            ApplicationManager.getApplication().executeOnPooledThread(() -> {
-                try {
-                    final MigrationState computedState = computeState(project);
-                    if (computedState != null) {
-                        project.putUserData(STATE_KEY, computedState);
-                        log.debug("[MigrateToAzureAction] Async load completed, state: {}", computedState.state);
-                    }
-                } finally {
-                    project.putUserData(LOADING_KEY, Boolean.FALSE);
-                }
-            });
-        }
-        
-        log.debug("[MigrateToAzureAction] State not ready yet, returning LOADING");
-        return new MigrationState(State.LOADING, List.of());
-    }
-    
-    /**
-     * Computes migration state by calling providers.
-     * Called by MigrationStatePreloader during project startup.
-     */
-    static MigrationState computeState(Project project) {
-        final long startTime = System.currentTimeMillis();
-        log.debug("[MigrateToAzureAction] computeState - start");
-        try {
-            final long providerStartTime = System.currentTimeMillis();
-            final List<MigrateNodeData> nodes = MIGRATION_PROVIDERS.getExtensionList().stream()
-                .filter(provider -> provider.isApplicable(project))
-                .sorted(Comparator.comparingInt(IMigrateOptionProvider::getPriority))
-                .flatMap(provider -> provider.createNodeData(project).stream())
-                .filter(MigrateNodeData::isVisible)
-                .collect(Collectors.toList());
-            
-            log.debug("[MigrateToAzureAction] computeState - loaded {} nodes, provider call took {}ms, total {}ms", 
-                nodes.size(), System.currentTimeMillis() - providerStartTime, System.currentTimeMillis() - startTime);
-            
-            if (nodes.isEmpty()) {
-                AppModUtils.logTelemetryEvent("action.no-tasks");
-            }
-            
-            return new MigrationState(
-                nodes.isEmpty() ? State.NO_OPTIONS : State.HAS_OPTIONS,
-                nodes
-            );
-        } catch (Exception e) {
-            log.error("[MigrateToAzureAction] Failed to compute migration state, took {}ms", System.currentTimeMillis() - startTime, e);
-            // Return null to indicate failure - caller should not cache this result
-            return null;
-        }
+        return MigrationStateService.getInstance(project).getState();
     }
 
     @Override
