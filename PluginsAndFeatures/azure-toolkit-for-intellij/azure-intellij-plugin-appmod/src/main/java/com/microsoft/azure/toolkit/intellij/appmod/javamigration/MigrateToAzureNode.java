@@ -5,8 +5,8 @@
 
 package com.microsoft.azure.toolkit.intellij.appmod.javamigration;
 
-import com.intellij.openapi.extensions.ExtensionPointName;
 import com.intellij.openapi.project.Project;
+import com.intellij.util.messages.MessageBusConnection;
 import lombok.extern.slf4j.Slf4j;
 import com.microsoft.azure.toolkit.ide.common.component.Node;
 import com.microsoft.azure.toolkit.ide.common.icon.AzureIcon;
@@ -18,7 +18,6 @@ import com.microsoft.azure.toolkit.intellij.appmod.common.AppModPluginInstaller;
 import com.microsoft.azure.toolkit.lib.common.action.Action;
 import com.microsoft.azure.toolkit.lib.common.action.ActionGroup;
 
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -26,14 +25,14 @@ import java.util.stream.Collectors;
 /**
  * Service Explorer node for "Migrate to Azure" functionality.
  * This node extends the azure-toolkit-ide-common-lib Node class to integrate with the Service Explorer tree.
- * 
- * State is computed on initialization and can be refreshed via refresh() method.
+ *
+ * Migration options come from the shared {@link MigrationStateService} so this node stays consistent
+ * with the context menu and Project Explorer surfaces. It listens to {@link MigrationStateService#TOPIC}
+ * and rebuilds whenever the shared state changes.
  */
 @Slf4j
 public final class MigrateToAzureNode extends Node<String> {
-    private static final ExtensionPointName<IMigrateOptionProvider> childProviders =
-        ExtensionPointName.create("com.microsoft.tooling.msservices.intellij.azure.migrateOptionProvider");
-    
+
     private final Project project;
 
     private static final AzureIcon APP_MOD_ICON = AzureIcon.builder().iconPath(Constants.ICON_APPMOD_PATH).build();
@@ -56,7 +55,17 @@ public final class MigrateToAzureNode extends Node<String> {
         
         // Use addChildren with a function so it rebuilds on refresh
         addChildren(data -> buildChildNodes());
-        
+
+        // Listen for shared migration state changes so this surface stays consistent
+        // with the context menu and Project Explorer.
+        final MessageBusConnection connection = project.getMessageBus().connect();
+        connection.subscribe(MigrationStateService.TOPIC,
+            (MigrationStateService.MigrationStateListener) () -> {
+                if (!project.isDisposed()) {
+                    refreshChildrenLater(false);
+                }
+            });
+
         initializeNode();
     }
 
@@ -75,12 +84,12 @@ public final class MigrateToAzureNode extends Node<String> {
     
     /**
      * Refreshes the node by re-computing migration options.
-     * Called by RefreshMigrateToAzureAction from context menu.
+     * Triggers a shared recompute so all surfaces (context menu, Project Explorer) refresh too.
      */
     public void refresh() {
         log.debug("[MigrateToAzureNode] refresh called");
         AppModUtils.logTelemetryEvent("node.refresh");
-        refreshChildren();  // This rebuilds children from addChildren function
+        MigrationStateService.getInstance(project).refreshAsync();
     }
 
     public Project getProject() {
@@ -103,25 +112,11 @@ public final class MigrateToAzureNode extends Node<String> {
     }
     
     /**
-     * Load migration options from extension points.
+     * Load migration options from the shared service.
      */
     private List<MigrateNodeData> loadMigrationNodeData() {
-        log.debug("[MigrateToAzureNode] loadMigrationNodeData - loading extension points");
-        try {
-            final List<MigrateNodeData> nodes = childProviders.getExtensionList().stream()
-                .filter(provider -> provider.isApplicable(project))
-                .sorted(Comparator.comparingInt(IMigrateOptionProvider::getPriority))
-                .flatMap(provider -> provider.createNodeData(project).stream())
-                .filter(MigrateNodeData::isVisible)
-                .collect(Collectors.toList());
-            if (nodes.isEmpty()) {
-                AppModUtils.logTelemetryEvent("node.no-tasks");
-            }
-            return nodes;
-        } catch (Exception e) {
-            log.error("[MigrateToAzureNode] Failed to load migration node data", e);
-            return List.of();
-        }
+        log.debug("[MigrateToAzureNode] loadMigrationNodeData - reading shared migration state");
+        return MigrationStateService.getInstance(project).getOrComputeNodes();
     }
     
     /**

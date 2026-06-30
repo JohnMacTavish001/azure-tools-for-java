@@ -7,111 +7,84 @@ package com.microsoft.azure.toolkit.intellij.connector.projectexplorer;
 
 import com.intellij.icons.AllIcons;
 import com.intellij.ide.projectView.PresentationData;
-import com.intellij.openapi.extensions.ExtensionPointName;
 import com.intellij.openapi.project.Project;
 import com.intellij.ui.tree.LeafState;
+import com.intellij.util.messages.MessageBusConnection;
 import com.microsoft.azure.toolkit.intellij.appmod.utils.AppModPanelHelper;
 import com.microsoft.azure.toolkit.intellij.appmod.utils.AppModUtils;
 import com.microsoft.azure.toolkit.intellij.appmod.utils.Constants;
 import com.microsoft.azure.toolkit.intellij.common.IntelliJAzureIcons;
 import com.microsoft.azure.toolkit.intellij.connector.dotazure.AzureModule;
-import com.microsoft.azure.toolkit.intellij.appmod.javamigration.IMigrateOptionProvider;
 import com.microsoft.azure.toolkit.intellij.appmod.javamigration.MigrateNodeData;
+import com.microsoft.azure.toolkit.intellij.appmod.javamigration.MigrationStateService;
 import com.microsoft.azure.toolkit.intellij.appmod.common.AppModPluginInstaller;
 import com.microsoft.azure.toolkit.ide.common.icon.AzureIcons;
 import com.microsoft.azure.toolkit.lib.common.action.Action;
 import com.microsoft.azure.toolkit.lib.common.action.ActionGroup;
 import com.microsoft.azure.toolkit.lib.common.action.IActionGroup;
+import com.microsoft.azure.toolkit.lib.common.task.AzureTaskManager;
 import lombok.extern.slf4j.Slf4j;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Comparator;
 import java.util.List;
-import java.util.stream.Collectors;
 
 /**
  * Project Explorer facet node for "Migrate to Azure" functionality.
- * Uses the same extension point as MigrateToAzureNode and MigrateToAzureAction for consistency.
- * 
- * State is computed on initialization and refreshed when buildChildren() is called (via tree refresh).
+ * Reads migration options from the shared {@link MigrationStateService} so it stays consistent
+ * with the Azure Explorer and context menu surfaces, and listens to
+ * {@link MigrationStateService#TOPIC} to refresh when the shared state changes.
  */
 @Slf4j
 public class MigrateToAzureFacetNode extends AbstractAzureFacetNode<AzureModule> {
-    private static final ExtensionPointName<IMigrateOptionProvider> migrationProviders =
-        ExtensionPointName.create("com.microsoft.tooling.msservices.intellij.azure.migrateOptionProvider");
-    
-    // Lazy-loaded state - computed on first access
-    private List<MigrateNodeData> migrationNodes = null;
-    
+
     public MigrateToAzureFacetNode(Project project, AzureModule module) {
         super(project, module);
         log.debug("[MigrateToAzureFacetNode] Creating node for project: {}", project.getName());
-        // Don't compute in constructor - use lazy loading
+        // Refresh this node whenever the shared migration state changes. Connection is tied to
+        // this node's lifecycle so it is released when the node is disposed. The view update is
+        // marshalled to the EDT because rerender() touches Swing/ProjectView APIs.
+        final MessageBusConnection connection = project.getMessageBus().connect(this);
+        connection.subscribe(MigrationStateService.TOPIC,
+            (MigrationStateService.MigrationStateListener) () -> AzureTaskManager.getInstance().runLater(() -> {
+                if (!project.isDisposed() && !this.isDisposed()) {
+                    updateChildren();
+                }
+            }));
     }
-    
+
     /**
-     * Gets migration nodes, computing them lazily on first access.
+     * Computes migration nodes from the shared service (blocking; called off the EDT).
      */
     private List<MigrateNodeData> getMigrationNodes() {
-        if (migrationNodes == null) {
-            log.debug("[MigrateToAzureFacetNode] getMigrationNodes - computing (first access)");
-            migrationNodes = computeMigrationNodes();
-        }
-        return migrationNodes;
+        return MigrationStateService.getInstance(getProject()).getOrComputeNodes();
     }
-    
-    /**
-     * Computes migration nodes from extension point providers.
-     */
-    private List<MigrateNodeData> computeMigrationNodes() {
-        log.debug("[MigrateToAzureFacetNode] computeMigrationNodes - appModInstalled: {}", AppModPluginInstaller.isAppModPluginInstalled());
-        try {
-            if (!AppModPluginInstaller.isAppModPluginInstalled()) {
-                return List.of();
-            }
-            final List<MigrateNodeData> nodes = migrationProviders.getExtensionList().stream()
-                .filter(provider -> provider.isApplicable(getProject()))
-                .sorted(Comparator.comparingInt(IMigrateOptionProvider::getPriority))
-                .flatMap(provider -> provider.createNodeData(getProject()).stream())
-                .filter(MigrateNodeData::isVisible)
-                .collect(Collectors.toList());
-            log.debug("[MigrateToAzureFacetNode] computeMigrationNodes - loaded {} nodes", nodes.size());
-            if (nodes.isEmpty()) {
-                AppModUtils.logTelemetryEvent("facet.no-tasks");
-            }
-            return nodes;
-        } catch (Exception e) {
-            log.error("[MigrateToAzureFacetNode] Failed to compute migration nodes", e);
-            return List.of();
-        }
-    }
-    
+
     /**
      * Checks if there are any visible migration options available.
-     * Only returns true if data has already been loaded (non-blocking).
+     * Only returns true if the shared state has already been loaded (non-blocking).
      */
     private boolean hasMigrationOptions() {
-        // Only check cached data - don't trigger loading on UI thread
-        return migrationNodes != null && !migrationNodes.isEmpty();
+        final MigrationStateService.MigrationState state = MigrationStateService.getInstance(getProject()).getCachedState();
+        return state != null && !state.nodes.isEmpty();
     }
-    
+
     /**
-     * Checks if migration nodes have been loaded.
+     * Checks if the shared migration state has been loaded.
      */
     private boolean isMigrationNodesLoaded() {
-        return migrationNodes != null;
+        return MigrationStateService.getInstance(getProject()).isLoaded();
     }
-    
+
     /**
      * Refreshes migration nodes and updates the tree view.
+     * Triggers a shared recompute so all surfaces refresh together.
      */
     public void refresh() {
         log.debug("[MigrateToAzureFacetNode] refresh called");
-        migrationNodes = null;  // Clear cached data to force recompute
-        updateChildren();  // This also refreshes the view
+        MigrationStateService.getInstance(getProject()).refreshAsync();
     }
     
     @Nullable
