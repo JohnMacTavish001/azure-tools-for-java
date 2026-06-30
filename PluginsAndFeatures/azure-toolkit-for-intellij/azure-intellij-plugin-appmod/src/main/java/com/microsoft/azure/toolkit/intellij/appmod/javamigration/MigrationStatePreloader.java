@@ -5,7 +5,6 @@
 
 package com.microsoft.azure.toolkit.intellij.appmod.javamigration;
 
-import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.startup.ProjectActivity;
 import com.microsoft.azure.toolkit.intellij.appmod.common.AppModPluginInstaller;
@@ -18,6 +17,7 @@ import org.jetbrains.annotations.Nullable;
 /**
  * Preloads migration state when project opens.
  * This ensures that when user opens the context menu, the data is already available.
+ * Delegates to the shared {@link MigrationStateService} so all UI surfaces share one cache.
  */
 @Slf4j
 public class MigrationStatePreloader implements ProjectActivity {
@@ -30,40 +30,17 @@ public class MigrationStatePreloader implements ProjectActivity {
             log.info("[MigrationStatePreloader] AppMod plugin not installed, skipping preload");
             return Unit.INSTANCE;
         }
-        
-        // Check if already loading or loaded
-        if (Boolean.TRUE.equals(project.getUserData(MigrateToAzureAction.LOADING_KEY)) ||
-            project.getUserData(MigrateToAzureAction.STATE_KEY) != null) {
-            log.debug("[MigrationStatePreloader] Already loading or loaded, skipping");
+
+        final MigrationStateService service = MigrationStateService.getInstance(project);
+        if (service.isLoaded()) {
+            log.debug("[MigrationStatePreloader] Already loaded, skipping");
             return Unit.INSTANCE;
         }
-        
-        // Mark as loading to prevent duplicate loading from MigrateToAzureAction
-        project.putUserData(MigrateToAzureAction.LOADING_KEY, Boolean.TRUE);
+
+        // Compute and cache asynchronously; this also notifies any already-built UI surfaces.
         log.info("[MigrationStatePreloader] Starting preload for project: {}", project.getName());
-        
-        // Load in background thread
-        ApplicationManager.getApplication().executeOnPooledThread(() -> {
-            try {
-                final long startTime = System.currentTimeMillis();
-                final MigrateToAzureAction.MigrationState state = MigrateToAzureAction.computeState(project);
-                // Only cache if computation succeeded (state != null)
-                // If failed (e.g., MCP server error), leave cache empty so next access will retry
-                if (state != null) {
-                    project.putUserData(MigrateToAzureAction.STATE_KEY, state);
-                    log.info("[MigrationStatePreloader] Preload completed for project: {}, state: {}, took {}ms", 
-                        project.getName(), state.state, System.currentTimeMillis() - startTime);
-                } else {
-                    log.warn("[MigrationStatePreloader] Preload failed for project: {}, will retry on next access", 
-                        project.getName());
-                }
-            } catch (Exception e) {
-                log.error("[MigrationStatePreloader] Preload failed for project: {}", project.getName(), e);
-            } finally {
-                project.putUserData(MigrateToAzureAction.LOADING_KEY, Boolean.FALSE);
-            }
-        });
-        
+        service.refreshAsync();
+
         return Unit.INSTANCE;
     }
 }
